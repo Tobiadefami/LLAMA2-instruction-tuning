@@ -30,7 +30,9 @@ MODEL_CONFIG: dict[str, type | Any] = {
 }
 
 if MODEL_CONFIG["tokenizer"].pad_token is None:
-        MODEL_CONFIG["tokenizer"].pad_token = MODEL_CONFIG["tokenizer"].eos_token
+    MODEL_CONFIG["tokenizer"].pad_token = MODEL_CONFIG["tokenizer"].eos_token
+
+MODEL_CONFIG["tokenizer"].padding_side = "right"
 
 
 class CastOutputToFloat(nn.Sequential):
@@ -51,7 +53,7 @@ def test_generation(model, test_example):
     print("Expected Output", expected_output_text)
 
 
-def print_trainable_parameters(model: AutoModelForCausalLM):
+def print_trainable_parameters(model):
     """
     Prints the number of trainable parameters in the model.
     """
@@ -69,18 +71,20 @@ def print_trainable_parameters(model: AutoModelForCausalLM):
 def main(
     experiment_name: str,
     data_file: str = dataset_path,
-    dataset_size: int | None = None,
+    model_path: str = pretrained_path,
+    dataset_size: int|None = None,
     dataloader_num_workers: int = 0,
     max_length: int = 512,
-    batch_size: int = 8,
+    batch_size: int = 10,
     dropout: float = 0.0,
     gradient_checkpointing: bool = False,
-    pretrained_checkpoint: str = pretrained_path,
+    pretrained_checkpoint: str | None = None,
     num_train_epochs: float = 10.0,
-    learning_rate: float = 2e-4,
+    learning_rate: float = 3e-4,
     weight_decay: float = 0.01,
     warmup_ratio: float = 0.1,
-    gradient_accumulation_steps: int = 4
+    gradient_accumulation_steps: int = 4,
+    resume: bool = False,
 ):
     # TODO: start training from random initialization
     # TODO: incorporate other objectives
@@ -97,15 +101,13 @@ def main(
     quant_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype="float16",  # halves the size of the mdoel
-        bnb_4bit_use_double_quant=False,
+        bnb_4bit_compute_dtype=torch.bfloat16,  # halves the size of the mdoel
+        bnb_4bit_use_double_quant=True,
     )
 
     model_cls: AutoModelForCausalLM = MODEL_CONFIG["model"]
+    model = model_cls.from_pretrained(model_path, quantization_config=quant_config)
 
-    model = model_cls.from_pretrained(
-        pretrained_checkpoint, quantization_config=quant_config
-    )
     print(model)
     for param in model.parameters():
         param.requires_grad = False  # freeze the model - train adapters later
@@ -120,7 +122,6 @@ def main(
 
     model = get_peft_model(model, peft_config)
     print_trainable_parameters(model)
-
     args = TrainingArguments(
         output_dir=experiment_name,
         run_name=experiment_name,
@@ -132,7 +133,7 @@ def main(
         prediction_loss_only=False,
         gradient_accumulation_steps=gradient_accumulation_steps,
         ignore_data_skip=False,
-        save_steps=1000,
+        save_steps=100,
         save_total_limit=2,
         save_strategy="steps",
         logging_steps=1,
@@ -144,7 +145,6 @@ def main(
         # gradient_checkpointing=gradient_checkpointing,
         fp16=True,
     )
-    
 
     collator = MODEL_CONFIG["collator"](
         tokenizer=MODEL_CONFIG["tokenizer"],
@@ -163,8 +163,11 @@ def main(
     )
     trainer = Trainer(**trainer_kwargs)
 
-    trainer.train()
-    test_generation(model, test_example=train_dataset[0])
+    if resume:
+        trainer.train(resume_from_checkpoint = resume)
+    else:
+        trainer.train()
+    # test_generation(model, test_example=train_dataset[0])
     trainer.save_model()
 
 
